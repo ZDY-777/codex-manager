@@ -1,0 +1,31 @@
+{
+  "mcpServers": {
+    "fetch": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ],
+      "env": {},
+      "disabled": false,
+      "autoApprove": []
+    },
+    "mcp_router": {
+      "command": "D:\\software\\node\\npx.cmd",
+      "args": [
+        "-y",
+        "@mcp_router/cli@latest",
+        "connect"
+      ],
+      "env": {
+        "LOCALAPPDATA": "C:\\Users\\17689\\AppData\\Local",
+        "MCPR_TOKEN": "mcpr_XkNrze3bv_ehpHJpO7kxQY1Ip8ej5i5U"
+      },
+      "disabled": false,
+      "autoApprove": [
+        "*",
+        "search"
+      ],
+      "disabledTools": []
+    }
+  }
+}
