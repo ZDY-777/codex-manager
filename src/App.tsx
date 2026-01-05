@@ -104,6 +104,7 @@ function App() {
           onClose={() => setIsSettingsOpen(false)}
           settings={settings}
           onUpdateSettings={updateSettings}
+          onRefresh={refresh}
         />
       </div>
     </div>

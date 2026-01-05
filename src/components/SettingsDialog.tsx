@@ -9,14 +9,16 @@ interface SettingsDialogProps {
     onClose: () => void;
     settings: AppSettings;
     onUpdateSettings: (settings: Partial<AppSettings>) => void;
+    onRefresh: () => Promise<void>;
 }
 
-export function SettingsDialog({ isOpen, onClose, settings, onUpdateSettings }: SettingsDialogProps) {
-    const { getAccountsDir, setAccountsDir, refresh } = useAccounts();
+export function SettingsDialog({ isOpen, onClose, settings, onUpdateSettings, onRefresh }: SettingsDialogProps) {
+    const { getAccountsDir, setAccountsDir } = useAccounts();
     const [localDir, setLocalDir] = useState<string>('');
     const [webdavTesting, setWebdavTesting] = useState(false);
     const [webdavSyncing, setWebdavSyncing] = useState(false);
     const [webdavMessage, setWebdavMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+    const [showWebdavPassword, setShowWebdavPassword] = useState(false);
 
     const webdav = settings.webdav || DEFAULT_SETTINGS.webdav!;
 
@@ -115,7 +117,7 @@ export function SettingsDialog({ isOpen, onClose, settings, onUpdateSettings }: 
             } else {
                 setWebdavMessage({ type: 'success', text: `成功下载 ${result.downloaded.length} 个文件` });
             }
-            await refresh();
+            await onRefresh();
         } catch (e: any) {
             setWebdavMessage({ type: 'error', text: e.toString() });
         } finally {
@@ -231,13 +233,23 @@ export function SettingsDialog({ isOpen, onClose, settings, onUpdateSettings }: 
                                     <label className="block text-xs font-medium text-slate-400 mb-1">
                                         应用密码（非登录密码）
                                     </label>
-                                    <input
-                                        type="password"
-                                        value={webdav.password}
-                                        onChange={(e) => updateWebdav({ password: e.target.value })}
-                                        placeholder="在坚果云生成的应用专用密码"
-                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:border-primary-500"
-                                    />
+                                    <div className="flex gap-2">
+                                        <input
+                                            type={showWebdavPassword ? 'text' : 'password'}
+                                            value={webdav.password}
+                                            onChange={(e) => updateWebdav({ password: e.target.value })}
+                                            placeholder="在坚果云生成的应用专用密码"
+                                            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:border-primary-500"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowWebdavPassword(v => !v)}
+                                            className="btn bg-slate-700 hover:bg-slate-600 text-xs px-3"
+                                            title={showWebdavPassword ? '隐藏密码' : '显示密码'}
+                                        >
+                                            {showWebdavPassword ? '隐藏' : '显示'}
+                                        </button>
+                                    </div>
                                 </div>
 
                                 <div>

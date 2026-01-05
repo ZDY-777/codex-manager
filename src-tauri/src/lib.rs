@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use tauri::{Manager, Emitter};
+use std::time::Duration;
+use tauri::{Emitter, Manager};
 
 // ========== 数据结构 ==========
 
@@ -607,95 +608,155 @@ pub struct SyncResult {
     pub errors: Vec<String>,
 }
 
+/// 创建带超时的 WebDAV 客户端，避免卡住无响应
+fn webdav_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(60))  // 坚果云 PROPFIND 可能较慢，增加超时
+        .build()
+        .map_err(|e| format!("创建 WebDAV 客户端失败: {}", e))
+}
+
+/// 规范化远程目录，确保前后斜杠存在
+fn normalize_remote_path(path: &str) -> String {
+    let mut p = path.trim().to_string();
+    if !p.starts_with('/') {
+        p.insert(0, '/');
+    }
+    if !p.ends_with('/') {
+        p.push('/');
+    }
+    p
+}
+
 /// 上传文件到 WebDAV
 async fn webdav_upload(client: &reqwest::Client, config: &WebDavConfig, filename: &str, content: &str) -> Result<(), String> {
-    let url = format!("{}{}{}", config.url.trim_end_matches('/'), config.remote_path, filename);
+    let remote_path = normalize_remote_path(&config.remote_path);
+    // 对文件名进行 URL 编码（处理中文文件名）
+    let encoded_filename = urlencoding::encode(filename);
+    let url = format!("{}{}{}", config.url.trim_end_matches('/'), remote_path, encoded_filename);
+    
+    println!("[WebDAV] 上传文件: {}", url);
     
     let response = client
         .put(&url)
         .basic_auth(&config.username, Some(&config.password))
-        .header("Content-Type", "application/json")
+        .header("Content-Type", "application/json; charset=utf-8")
         .body(content.to_string())
         .send()
         .await
         .map_err(|e| format!("上传失败: {}", e))?;
     
-    if response.status().is_success() || response.status().as_u16() == 201 {
+    let status = response.status();
+    println!("[WebDAV] 上传响应状态: {}", status);
+    
+    if status.is_success() || status.as_u16() == 201 {
         Ok(())
     } else {
-        Err(format!("上传失败: HTTP {}", response.status()))
+        Err(format!("上传失败: HTTP {}", status))
     }
 }
 
 /// 从 WebDAV 下载文件
 async fn webdav_download(client: &reqwest::Client, config: &WebDavConfig, filename: &str) -> Result<String, String> {
-    let url = format!("{}{}{}", config.url.trim_end_matches('/'), config.remote_path, filename);
+    let remote_path = normalize_remote_path(&config.remote_path);
+    // 对文件名进行 URL 编码（处理中文文件名）
+    let encoded_filename = urlencoding::encode(filename);
+    let url = format!("{}{}{}", config.url.trim_end_matches('/'), remote_path, encoded_filename);
+    
+    println!("[WebDAV] 下载文件: {}", url);
     
     let response = client
         .get(&url)
         .basic_auth(&config.username, Some(&config.password))
+        .header("Accept", "*/*")
         .send()
         .await
         .map_err(|e| format!("下载失败: {}", e))?;
     
-    if response.status().is_success() {
-        response.text().await.map_err(|e| format!("读取响应失败: {}", e))
+    let status = response.status();
+    println!("[WebDAV] 下载响应状态: {}", status);
+    
+    if status.is_success() {
+        let content = response.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+        println!("[WebDAV] 下载成功: {} ({} 字节)", filename, content.len());
+        Ok(content)
     } else {
-        Err(format!("下载失败: HTTP {}", response.status()))
+        Err(format!("下载失败: HTTP {}", status))
     }
 }
 
 /// 列出 WebDAV 目录中的文件
 async fn webdav_list(client: &reqwest::Client, config: &WebDavConfig) -> Result<Vec<String>, String> {
-    let url = format!("{}{}", config.url.trim_end_matches('/'), config.remote_path);
+    let remote_path = normalize_remote_path(&config.remote_path);
+    let url = format!("{}{}", config.url.trim_end_matches('/'), remote_path);
+    
+    println!("[WebDAV] 列目录请求: {}", url);
     
     let response = client
         .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &url)
         .basic_auth(&config.username, Some(&config.password))
         .header("Depth", "1")
-        .header("Content-Type", "application/xml")
-        .body(r#"<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><displayname/></prop></propfind>"#)
+        .header("Content-Type", "application/xml; charset=utf-8")
+        .header("Accept", "*/*")
+        .body(r#"<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><displayname/><getcontentlength/></prop></propfind>"#)
         .send()
         .await
         .map_err(|e| format!("列目录失败: {}", e))?;
     
-    if !response.status().is_success() && response.status().as_u16() != 207 {
-        return Err(format!("列目录失败: HTTP {}", response.status()));
+    let status = response.status();
+    println!("[WebDAV] 列目录响应状态: {}", status);
+    
+    if !status.is_success() && status.as_u16() != 207 {
+        return Err(format!("列目录失败: HTTP {}", status));
     }
     
     let body = response.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+    println!("[WebDAV] 响应长度: {} 字节", body.len());
+    println!("[WebDAV] 响应内容: {}", &body[..body.len().min(500)]);
     
-    // 简单解析 XML 提取 .json 文件名
+    // 使用正则表达式提取 href 内容，更可靠
     let mut files = Vec::new();
-    for line in body.lines() {
-        if line.contains(".json") {
-            // 提取文件名
-            if let Some(start) = line.find(config.remote_path.as_str()) {
-                let rest = &line[start + config.remote_path.len()..];
-                if let Some(end) = rest.find('<') {
-                    let filename = &rest[..end];
-                    if filename.ends_with(".json") && !filename.is_empty() {
-                        files.push(filename.to_string());
+    
+    // 匹配 <d:href>...</d:href> 或 <D:href>...</D:href> 或 <href>...</href>
+    let href_patterns = ["<d:href>", "<D:href>", "<href>"];
+    let href_end_patterns = ["</d:href>", "</D:href>", "</href>"];
+    
+    for (start_pat, end_pat) in href_patterns.iter().zip(href_end_patterns.iter()) {
+        let mut search_pos = 0;
+        while let Some(start_idx) = body[search_pos..].find(start_pat) {
+            let abs_start = search_pos + start_idx + start_pat.len();
+            if let Some(end_idx) = body[abs_start..].find(end_pat) {
+                let href_content = &body[abs_start..abs_start + end_idx];
+                println!("[WebDAV] 找到 href: {}", href_content);
+                
+                // URL 解码
+                let decoded = urlencoding::decode(href_content).unwrap_or_else(|_| href_content.into());
+                
+                // 提取文件名
+                if let Some(name) = decoded.rsplit('/').next() {
+                    if name.ends_with(".json") && !name.is_empty() {
+                        println!("[WebDAV] 发现文件: {}", name);
+                        if !files.contains(&name.to_string()) {
+                            files.push(name.to_string());
+                        }
                     }
                 }
-            } else if let Some(start) = line.rfind('/') {
-                let rest = &line[start + 1..];
-                if let Some(end) = rest.find('<') {
-                    let filename = &rest[..end];
-                    if filename.ends_with(".json") && !filename.is_empty() {
-                        files.push(filename.to_string());
-                    }
-                }
+                search_pos = abs_start + end_idx;
+            } else {
+                break;
             }
         }
     }
     
+    println!("[WebDAV] 共发现 {} 个 JSON 文件", files.len());
     Ok(files)
 }
 
 /// 确保 WebDAV 远程目录存在
 async fn webdav_ensure_dir(client: &reqwest::Client, config: &WebDavConfig) -> Result<(), String> {
-    let url = format!("{}{}", config.url.trim_end_matches('/'), config.remote_path.trim_end_matches('/'));
+    let remote_path = normalize_remote_path(&config.remote_path);
+    let url = format!("{}{}", config.url.trim_end_matches('/'), remote_path.trim_end_matches('/'));
     
     let response = client
         .request(reqwest::Method::from_bytes(b"MKCOL").unwrap(), &url)
@@ -716,7 +777,7 @@ async fn webdav_ensure_dir(client: &reqwest::Client, config: &WebDavConfig) -> R
 /// 同步到 WebDAV (上传本地文件)
 #[tauri::command]
 async fn webdav_sync_upload(config: WebDavConfig) -> Result<SyncResult, String> {
-    let client = reqwest::Client::new();
+    let client = webdav_client()?;
     let accounts_dir = get_accounts_dir();
     
     let mut result = SyncResult {
@@ -757,7 +818,7 @@ async fn webdav_sync_upload(config: WebDavConfig) -> Result<SyncResult, String> 
 /// 从 WebDAV 同步 (下载远程文件)
 #[tauri::command]
 async fn webdav_sync_download(config: WebDavConfig) -> Result<SyncResult, String> {
-    let client = reqwest::Client::new();
+    let client = webdav_client()?;
     let accounts_dir = get_accounts_dir();
     
     let mut result = SyncResult {
@@ -799,10 +860,11 @@ async fn webdav_sync_download(config: WebDavConfig) -> Result<SyncResult, String
 /// 测试 WebDAV 连接
 #[tauri::command]
 async fn webdav_test_connection(config: WebDavConfig) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = webdav_client()?;
+    let remote_path = normalize_remote_path(&config.remote_path);
     
     // 尝试 PROPFIND 根目录
-    let url = format!("{}{}", config.url.trim_end_matches('/'), config.remote_path);
+    let url = format!("{}{}", config.url.trim_end_matches('/'), remote_path);
     
     let response = client
         .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &url)
