@@ -11,19 +11,24 @@ Codex Manager 是一个基于 **Tauri + React + Rust** 构建的 OpenAI 账号�
 *   **📊 实时监控**：
     *   直观展示 **5小时限制 (5-Hour Limit)** 和 **每周限制 (Weekly Limit)** 的剩余百分比。
     *   精准显示重置倒计时 (e.g., "2小时后重置")。
-
 *   **⚡ 智能调度 (Smart Scheduling)**：
-    *   **自动切换**：当当前账号 Token 过期或剩余额度低于自定义阈值时，后台自动检测并切换到最佳备选账号（周周重置时间最早）。
+    *   **自动切换**：当当前账号 Token 过期或剩余额度低于自定义阈值时，后台自动检测并切换到最佳备选账号。
     *   **可调阈值**：剩余百分比 1%~50% 可配置，默认 5%。
 *   **➕ 快捷添加**：支持直接粘贴 `auth.json` 内容添加账号，自动提取邮箱作为文件名。
-*   **☁️ 坚果云同步**：支持通过 WebDAV 将账号配置同步到坚果云，多设备共享。
+*   **📝 Codex 配置管理**：
+    *   管理 Prompts（`~/.codex/prompts/`）
+    *   管理 Skills（`~/.codex/skills/`）
+    *   编辑 AGENTS.MD 系统提示词
+    *   编辑 config.toml 配置文件
+*   **☁️ WebDAV 云同步**：
+    *   账号配置同步到坚果云，多设备共享
+    *   Codex 配置同步（Prompts、Skills、AGENTS.MD、config.toml 可选）
 
 
 ## 📸 界面预览
 
-
+<!-- TODO: 更新截图 -->
 ![Codex Manager Dashboard](src/assets/preview.jpg)
-![alt text](src/assets/image.png)
 ## 🚀 快速开始
 
 ### 安装

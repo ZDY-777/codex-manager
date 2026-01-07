@@ -40,6 +40,25 @@ export interface WebDavConfig {
     remotePath: string; // 远程目录路径，如 /codex-manager/
 }
 
+export interface SyncSettings {
+    // 同步内容
+    syncAccounts: boolean;    // 账号文件
+    syncPrompts: boolean;     // Prompts
+    syncSkills: boolean;      // Skills
+    syncAgentsMd: boolean;    // AGENTS.MD
+    syncConfigToml: boolean;  // config.toml
+    // 上次同步时间
+    lastSyncTime?: number;
+}
+
+export const DEFAULT_SYNC_SETTINGS: SyncSettings = {
+    syncAccounts: true,
+    syncPrompts: true,
+    syncSkills: true,
+    syncAgentsMd: true,
+    syncConfigToml: false,  // 默认不同步（MCP路径因设备而异）
+};
+
 export interface AppSettings {
     accountsDir?: string;
     autoCheck: boolean;
@@ -47,6 +66,7 @@ export interface AppSettings {
     enableAutoSwitch: boolean;
     autoSwitchThreshold: number; // percent remaining to trigger switch
     webdav?: WebDavConfig;
+    sync?: SyncSettings;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -61,6 +81,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
         password: '',
         remotePath: '/codex-manager/',
     },
+    sync: DEFAULT_SYNC_SETTINGS,
 };
 
 // ========== Prompts & Skills ==========
@@ -87,19 +108,30 @@ export interface CodexSyncConfig {
     syncPrompts: boolean;
     syncSkills: boolean;
     syncAgentsMd: boolean;
-    syncModelConfig: boolean;      // model, model_reasoning_effort
-    syncMcpServers: boolean;       // mcp_servers.*
-    syncOtherConfig: boolean;      // notice.* 等其他配置
+    syncConfigToml: boolean;
 }
 
 export const DEFAULT_CODEX_SYNC_CONFIG: CodexSyncConfig = {
     syncPrompts: true,
     syncSkills: true,
     syncAgentsMd: true,
-    syncModelConfig: true,
-    syncMcpServers: false,         // 默认不同步（路径因设备而异）
-    syncOtherConfig: false,
+    syncConfigToml: false,  // 默认不同步（MCP路径因设备而异）
 };
+
+export interface SyncPreviewItem {
+    name: string;
+    type: 'account' | 'prompt' | 'skill' | 'agents' | 'config';
+    action: 'upload' | 'download' | 'conflict' | 'unchanged';
+    localTime?: number;
+    remoteTime?: number;
+}
+
+export interface SyncPreview {
+    items: SyncPreviewItem[];
+    uploadCount: number;
+    downloadCount: number;
+    conflictCount: number;
+}
 
 export interface SyncResult {
     uploaded: string[];

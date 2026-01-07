@@ -774,7 +774,7 @@ async fn webdav_ensure_dir(client: &reqwest::Client, config: &WebDavConfig) -> R
     }
 }
 
-/// 同步到 WebDAV (上传本地文件)
+/// 同步账号到 WebDAV (上传本地账号文件到 accounts/ 子目录)
 #[tauri::command]
 async fn webdav_sync_upload(config: WebDavConfig) -> Result<SyncResult, String> {
     let client = webdav_client()?;
@@ -786,13 +786,24 @@ async fn webdav_sync_upload(config: WebDavConfig) -> Result<SyncResult, String> 
         errors: Vec::new(),
     };
     
-    // 确保远程目录存在
+    // 确保远程根目录存在
     if let Err(e) = webdav_ensure_dir(&client, &config).await {
-        // 忽略目录已存在的错误
-        println!("创建目录: {}", e);
+        println!("创建根目录: {}", e);
     }
     
-    // 读取本地文件并上传
+    // 创建 accounts 子目录
+    let accounts_remote_path = format!("{}accounts/", config.remote_path.trim_end_matches('/'));
+    let accounts_config = WebDavConfig {
+        url: config.url.clone(),
+        username: config.username.clone(),
+        password: config.password.clone(),
+        remote_path: accounts_remote_path,
+    };
+    if let Err(e) = webdav_ensure_dir(&client, &accounts_config).await {
+        println!("创建 accounts 目录: {}", e);
+    }
+    
+    // 读取本地文件并上传到 accounts/ 子目录
     if let Ok(entries) = fs::read_dir(&accounts_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -800,7 +811,7 @@ async fn webdav_sync_upload(config: WebDavConfig) -> Result<SyncResult, String> 
                 if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
                     match fs::read_to_string(&path) {
                         Ok(content) => {
-                            match webdav_upload(&client, &config, filename, &content).await {
+                            match webdav_upload(&client, &accounts_config, filename, &content).await {
                                 Ok(_) => result.uploaded.push(filename.to_string()),
                                 Err(e) => result.errors.push(format!("{}: {}", filename, e)),
                             }
@@ -815,7 +826,7 @@ async fn webdav_sync_upload(config: WebDavConfig) -> Result<SyncResult, String> 
     Ok(result)
 }
 
-/// 从 WebDAV 同步 (下载远程文件)
+/// 从 WebDAV 同步账号 (从 accounts/ 子目录下载)
 #[tauri::command]
 async fn webdav_sync_download(config: WebDavConfig) -> Result<SyncResult, String> {
     let client = webdav_client()?;
@@ -832,12 +843,21 @@ async fn webdav_sync_download(config: WebDavConfig) -> Result<SyncResult, String
         fs::create_dir_all(&accounts_dir).map_err(|e| format!("创建本地目录失败: {}", e))?;
     }
     
+    // 从 accounts/ 子目录下载
+    let accounts_remote_path = format!("{}accounts/", config.remote_path.trim_end_matches('/'));
+    let accounts_config = WebDavConfig {
+        url: config.url.clone(),
+        username: config.username.clone(),
+        password: config.password.clone(),
+        remote_path: accounts_remote_path,
+    };
+    
     // 列出远程文件
-    let remote_files = webdav_list(&client, &config).await?;
+    let remote_files = webdav_list(&client, &accounts_config).await?;
     
     // 下载每个文件
     for filename in remote_files {
-        match webdav_download(&client, &config, &filename).await {
+        match webdav_download(&client, &accounts_config, &filename).await {
             Ok(content) => {
                 // 验证 JSON 格式
                 if serde_json::from_str::<serde_json::Value>(&content).is_ok() {
@@ -937,12 +957,8 @@ pub struct CodexSyncConfig {
     pub sync_skills: bool,
     #[serde(rename = "syncAgentsMd")]
     pub sync_agents_md: bool,
-    #[serde(rename = "syncModelConfig")]
-    pub sync_model_config: bool,
-    #[serde(rename = "syncMcpServers")]
-    pub sync_mcp_servers: bool,
-    #[serde(rename = "syncOtherConfig")]
-    pub sync_other_config: bool,
+    #[serde(rename = "syncConfigToml")]
+    pub sync_config_toml: bool,
 }
 
 impl Default for CodexSyncConfig {
@@ -951,122 +967,9 @@ impl Default for CodexSyncConfig {
             sync_prompts: true,
             sync_skills: true,
             sync_agents_md: true,
-            sync_model_config: true,
-            sync_mcp_servers: false,
-            sync_other_config: false,
+            sync_config_toml: false,
         }
     }
-}
-
-/// 根据同步配置过滤 config.toml 内容
-fn filter_config_toml(content: &str, sync_config: &CodexSyncConfig) -> String {
-    let mut output = String::new();
-    let mut current_section = String::new();
-    let mut in_mcp_section = false;
-    let mut skip_section = false;
-    
-    for line in content.lines() {
-        let trimmed = line.trim();
-        
-        // 检测 section 头
-        if trimmed.starts_with('[') {
-            // 判断是否是 mcp_servers section
-            if trimmed.starts_with("[mcp_servers") {
-                in_mcp_section = true;
-                current_section = "mcp_servers".to_string();
-                skip_section = !sync_config.sync_mcp_servers;
-            } else if trimmed.starts_with("[notice") {
-                in_mcp_section = false;
-                current_section = "notice".to_string();
-                skip_section = !sync_config.sync_other_config;
-            } else {
-                in_mcp_section = false;
-                current_section = trimmed.trim_matches(|c| c == '[' || c == ']').to_string();
-                skip_section = !sync_config.sync_other_config;
-            }
-            
-            if !skip_section {
-                output.push_str(line);
-                output.push('\n');
-            }
-            continue;
-        }
-        
-        // 顶层键值对（不在任何 section 内）
-        if current_section.is_empty() && !in_mcp_section {
-            // model 和 model_reasoning_effort 属于模型配置
-            if trimmed.starts_with("model") {
-                if sync_config.sync_model_config {
-                    output.push_str(line);
-                    output.push('\n');
-                }
-            } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                // 其他顶层配置
-                if sync_config.sync_other_config {
-                    output.push_str(line);
-                    output.push('\n');
-                }
-            } else if trimmed.is_empty() || trimmed.starts_with('#') {
-                // 保留空行和注释（如果前面有内容）
-                if !output.is_empty() {
-                    output.push_str(line);
-                    output.push('\n');
-                }
-            }
-            continue;
-        }
-        
-        // section 内的内容
-        if !skip_section {
-            output.push_str(line);
-            output.push('\n');
-        }
-    }
-    
-    output
-}
-
-/// 合并远程 config.toml 到本地
-fn merge_config_toml(local_content: &str, remote_content: &str, sync_config: &CodexSyncConfig) -> String {
-    // 简单策略：用远程的同步字段覆盖本地
-    // 解析远程内容中的字段
-    let mut result = local_content.to_string();
-    
-    for line in remote_content.lines() {
-        let trimmed = line.trim();
-        
-        // 处理顶层 model 配置
-        if trimmed.starts_with("model") && sync_config.sync_model_config {
-            // 查找并替换本地的对应行
-            let key = if let Some(eq_idx) = trimmed.find('=') {
-                trimmed[..eq_idx].trim()
-            } else {
-                continue;
-            };
-            
-            // 在本地内容中查找并替换
-            let mut new_result = String::new();
-            let mut replaced = false;
-            for local_line in result.lines() {
-                if local_line.trim().starts_with(key) && local_line.contains('=') {
-                    new_result.push_str(line);
-                    replaced = true;
-                } else {
-                    new_result.push_str(local_line);
-                }
-                new_result.push('\n');
-            }
-            
-            // 如果本地没有这个字段，添加到开头
-            if !replaced {
-                result = format!("{}\n{}", line, result);
-            } else {
-                result = new_result;
-            }
-        }
-    }
-    
-    result
 }
 
 /// 解析 Markdown frontmatter (YAML)
@@ -1337,6 +1240,26 @@ fn save_agents_md(content: String) -> Result<(), String> {
         .map_err(|e| format!("保存文件失败: {}", e))
 }
 
+/// 读取 config.toml
+#[tauri::command]
+fn read_config_toml() -> Result<String, String> {
+    let config_toml = get_codex_dir().join("config.toml");
+    if config_toml.exists() {
+        fs::read_to_string(&config_toml)
+            .map_err(|e| format!("读取文件失败: {}", e))
+    } else {
+        Ok(String::new())
+    }
+}
+
+/// 保存 config.toml
+#[tauri::command]
+fn save_config_toml(content: String) -> Result<(), String> {
+    let config_toml = get_codex_dir().join("config.toml");
+    fs::write(&config_toml, content)
+        .map_err(|e| format!("保存文件失败: {}", e))
+}
+
 /// 打开 Codex 目录
 #[tauri::command]
 fn open_codex_dir() -> Result<String, String> {
@@ -1383,25 +1306,19 @@ async fn webdav_sync_codex_upload(config: WebDavConfig, sync_config: CodexSyncCo
         errors: Vec::new(),
     };
     
-    // 确保远程 codex 目录存在
-    let codex_remote_path = format!("{}codex/", config.remote_path.trim_end_matches('/'));
-    let codex_config = WebDavConfig {
-        url: config.url.clone(),
-        username: config.username.clone(),
-        password: config.password.clone(),
-        remote_path: codex_remote_path.clone(),
-    };
-    
-    if let Err(e) = webdav_ensure_dir(&client, &codex_config).await {
-        println!("创建 codex 目录: {}", e);
+    // 确保远程根目录存在
+    if let Err(e) = webdav_ensure_dir(&client, &config).await {
+        println!("创建根目录: {}", e);
     }
     
-    // 同步 AGENTS.MD
+    let base_path = config.remote_path.trim_end_matches('/');
+    
+    // 同步 AGENTS.MD (直接放在根目录)
     if sync_config.sync_agents_md {
         let agents_md = codex_dir.join("AGENTS.MD");
         if agents_md.exists() {
             if let Ok(content) = fs::read_to_string(&agents_md) {
-                match webdav_upload(&client, &codex_config, "AGENTS.MD", &content).await {
+                match webdav_upload(&client, &config, "AGENTS.MD", &content).await {
                     Ok(_) => result.uploaded.push("AGENTS.MD".to_string()),
                     Err(e) => result.errors.push(format!("AGENTS.MD: {}", e)),
                 }
@@ -1409,9 +1326,22 @@ async fn webdav_sync_codex_upload(config: WebDavConfig, sync_config: CodexSyncCo
         }
     }
     
+    // 同步 config.toml (直接放在根目录)
+    if sync_config.sync_config_toml {
+        let config_toml = codex_dir.join("config.toml");
+        if config_toml.exists() {
+            if let Ok(content) = fs::read_to_string(&config_toml) {
+                match webdav_upload(&client, &config, "config.toml", &content).await {
+                    Ok(_) => result.uploaded.push("config.toml".to_string()),
+                    Err(e) => result.errors.push(format!("config.toml: {}", e)),
+                }
+            }
+        }
+    }
+    
     // 同步 prompts
     if sync_config.sync_prompts {
-        let prompts_remote = format!("{}prompts/", codex_remote_path);
+        let prompts_remote = format!("{}/prompts/", base_path);
         let prompts_config = WebDavConfig {
             url: config.url.clone(),
             username: config.username.clone(),
@@ -1428,7 +1358,7 @@ async fn webdav_sync_codex_upload(config: WebDavConfig, sync_config: CodexSyncCo
     
     // 同步 skills
     if sync_config.sync_skills {
-        let skills_remote = format!("{}skills/", codex_remote_path);
+        let skills_remote = format!("{}/skills/", base_path);
         let skills_config = WebDavConfig {
             url: config.url.clone(),
             username: config.username.clone(),
@@ -1464,22 +1394,6 @@ async fn webdav_sync_codex_upload(config: WebDavConfig, sync_config: CodexSyncCo
                     };
                     let _ = webdav_ensure_dir(&client, &skill_config).await;
                     upload_dir_recursive(&client, &skill_config, &path, &mut result).await;
-                }
-            }
-        }
-    }
-    
-    // 同步 config.toml (按字段分组)
-    if sync_config.sync_model_config || sync_config.sync_mcp_servers || sync_config.sync_other_config {
-        let config_toml = codex_dir.join("config.toml");
-        if config_toml.exists() {
-            if let Ok(content) = fs::read_to_string(&config_toml) {
-                let filtered = filter_config_toml(&content, &sync_config);
-                if !filtered.trim().is_empty() {
-                    match webdav_upload(&client, &codex_config, "config.sync.toml", &filtered).await {
-                        Ok(_) => result.uploaded.push("config.sync.toml".to_string()),
-                        Err(e) => result.errors.push(format!("config.sync.toml: {}", e)),
-                    }
                 }
             }
         }
@@ -1596,26 +1510,19 @@ async fn webdav_sync_codex_download(config: WebDavConfig, sync_config: CodexSync
         download_dir_recursive(&client, &skills_config, &skills_dir, &mut result).await;
     }
     
-    // 下载并合并 config.toml
-    if sync_config.sync_model_config || sync_config.sync_mcp_servers || sync_config.sync_other_config {
-        match webdav_download(&client, &codex_config, "config.sync.toml").await {
+    // 下载 config.toml
+    if sync_config.sync_config_toml {
+        match webdav_download(&client, &codex_config, "config.toml").await {
             Ok(remote_content) => {
                 let config_toml = codex_dir.join("config.toml");
-                let local_content = if config_toml.exists() {
-                    fs::read_to_string(&config_toml).unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                
-                let merged = merge_config_toml(&local_content, &remote_content, &sync_config);
-                match fs::write(&config_toml, &merged) {
-                    Ok(_) => result.downloaded.push("config.toml (merged)".to_string()),
+                match fs::write(&config_toml, &remote_content) {
+                    Ok(_) => result.downloaded.push("config.toml".to_string()),
                     Err(e) => result.errors.push(format!("config.toml: 写入失败 {}", e)),
                 }
             }
             Err(e) => {
                 if !e.contains("404") && !e.contains("HTTP 404") {
-                    result.errors.push(format!("config.sync.toml: {}", e));
+                    result.errors.push(format!("config.toml: {}", e));
                 }
             }
         }
@@ -1744,6 +1651,129 @@ async fn webdav_list_all(client: &reqwest::Client, config: &WebDavConfig) -> Res
     Ok(items)
 }
 
+// ========== Token 刷新 ==========
+
+/// Token 刷新请求结构
+#[derive(Debug, Serialize)]
+struct TokenRefreshRequest {
+    client_id: &'static str,
+    grant_type: &'static str,
+    refresh_token: String,
+    scope: &'static str,
+}
+
+/// Token 刷新响应结构
+#[derive(Debug, Deserialize)]
+struct TokenRefreshResponse {
+    id_token: Option<String>,
+    access_token: Option<String>,
+    refresh_token: Option<String>,
+}
+
+/// Codex CLI 使用的 Client ID（公开的）
+const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const TOKEN_REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
+
+/// 刷新指定账号的 Token
+#[tauri::command]
+async fn refresh_account_token(file_path: String) -> Result<String, String> {
+    // 读取认证文件
+    let content = fs::read_to_string(&file_path)
+        .map_err(|e| format!("读取认证文件失败: {}", e))?;
+    
+    let auth: CodexAuthFile = serde_json::from_str(&content)
+        .map_err(|e| format!("解析认证文件失败: {}", e))?;
+    
+    let refresh_token = &auth.tokens.refresh_token;
+    
+    // 构建刷新请求
+    let refresh_request = TokenRefreshRequest {
+        client_id: CODEX_CLIENT_ID,
+        grant_type: "refresh_token",
+        refresh_token: refresh_token.clone(),
+        scope: "openid profile email",
+    };
+    
+    println!("[Token Refresh] 开始刷新 Token...");
+    println!("[Token Refresh] URL: {}", TOKEN_REFRESH_URL);
+    
+    // 发送刷新请求
+    let client = reqwest::Client::new();
+    let response = client
+        .post(TOKEN_REFRESH_URL)
+        .header("Content-Type", "application/json")
+        .json(&refresh_request)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+    
+    let status = response.status();
+    println!("[Token Refresh] 响应状态: {}", status);
+    
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        println!("[Token Refresh] 错误响应: {}", body);
+        
+        // 解析错误信息
+        if let Ok(error_json) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(error) = error_json.get("error") {
+                let error_code = error.get("code")
+                    .or_else(|| error_json.get("code"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                
+                return match error_code {
+                    "refresh_token_expired" => Err("Refresh Token 已过期，请重新登录 Codex CLI".to_string()),
+                    "refresh_token_reused" => Err("Refresh Token 已被使用，请重新登录 Codex CLI".to_string()),
+                    "refresh_token_invalidated" => Err("Refresh Token 已被撤销，请重新登录 Codex CLI".to_string()),
+                    _ => Err(format!("刷新失败: {} - {}", status, body)),
+                };
+            }
+        }
+        
+        return Err(format!("刷新失败: HTTP {} - {}", status, body));
+    }
+    
+    // 解析响应
+    let refresh_response: TokenRefreshResponse = response.json().await
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+    
+    println!("[Token Refresh] 刷新成功!");
+    println!("[Token Refresh] 新 access_token: {}...", 
+        refresh_response.access_token.as_ref().map(|t| &t[..20.min(t.len())]).unwrap_or("无"));
+    println!("[Token Refresh] 新 id_token: {}...", 
+        refresh_response.id_token.as_ref().map(|t| &t[..20.min(t.len())]).unwrap_or("无"));
+    println!("[Token Refresh] 新 refresh_token: {}...", 
+        refresh_response.refresh_token.as_ref().map(|t| &t[..20.min(t.len())]).unwrap_or("无"));
+    
+    // 更新认证文件
+    let mut updated_auth = auth.clone();
+    
+    if let Some(new_access_token) = refresh_response.access_token {
+        updated_auth.tokens.access_token = new_access_token;
+    }
+    if let Some(new_id_token) = refresh_response.id_token {
+        updated_auth.tokens.id_token = new_id_token;
+    }
+    if let Some(new_refresh_token) = refresh_response.refresh_token {
+        updated_auth.tokens.refresh_token = new_refresh_token;
+    }
+    
+    // 更新 last_refresh 时间
+    updated_auth.last_refresh = chrono::Utc::now().to_rfc3339();
+    
+    // 写回文件
+    let updated_content = serde_json::to_string_pretty(&updated_auth)
+        .map_err(|e| format!("序列化失败: {}", e))?;
+    
+    fs::write(&file_path, &updated_content)
+        .map_err(|e| format!("写入文件失败: {}", e))?;
+    
+    println!("[Token Refresh] 已更新认证文件: {}", file_path);
+    
+    Ok("Token 刷新成功".to_string())
+}
+
 // ========== 入口 ==========
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1854,9 +1884,12 @@ pub fn run() {
             delete_skill,
             read_agents_md,
             save_agents_md,
+            read_config_toml,
+            save_config_toml,
             open_codex_dir,
             webdav_sync_codex_upload,
-            webdav_sync_codex_download
+            webdav_sync_codex_download,
+            refresh_account_token
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

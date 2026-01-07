@@ -20,43 +20,138 @@
 body {
   min-width: 400px;
   min-height: 500px;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
 }
 
 @layer components {
-  .card {
-    @apply bg-slate-800/60 backdrop-blur-sm border border-slate-700/50 rounded-xl p-4 transition-all duration-200;
+  /* ========== Glassmorphism 基础样式 ========== */
+  
+  /* 基础玻璃卡片 */
+  .glass {
+    @apply bg-white/10 backdrop-blur-[12px] border border-white/15 rounded-2xl shadow-glass;
   }
   
-  .card:hover {
-    @apply border-slate-600/50 bg-slate-800/80;
+  .glass-hover {
+    @apply transition-all duration-300 hover:bg-white/15 hover:border-white/25 hover:shadow-glass-hover hover:-translate-y-0.5;
   }
   
-  .card-active {
-    @apply border-primary-500/50 bg-gradient-to-r from-primary-900/20 to-slate-800/60;
+  /* 强调玻璃效果 */
+  .glass-strong {
+    @apply bg-white/15 backdrop-blur-[20px] border border-white/20 rounded-2xl shadow-glass;
   }
+  
+  /* 轻量玻璃效果 */
+  .glass-light {
+    @apply bg-white/5 backdrop-blur-[8px] border border-white/10 rounded-xl;
+  }
+  
+  /* ========== 发光边框效果 ========== */
+  
+  .glow-border {
+    @apply border-primary-500/50 shadow-glow;
+  }
+  
+  .glow-border-strong {
+    @apply border-primary-400/60 shadow-glow-strong animate-glow;
+  }
+  
+  .glow-border-emerald {
+    @apply border-emerald-500/50 shadow-glow-emerald;
+  }
+  
+  .glow-border-amber {
+    @apply border-amber-500/50 shadow-glow-amber;
+  }
+  
+  .glow-border-rose {
+    @apply border-rose-500/50 shadow-glow-rose;
+  }
+  
+  /* ========== 渐变效果 ========== */
+  
+  /* 渐变文字 */
+  .text-gradient {
+    @apply bg-gradient-to-r from-white via-primary-200 to-primary-400 bg-clip-text text-transparent;
+  }
+  
+  .text-gradient-cyan {
+    @apply bg-gradient-to-r from-cyan-400 to-primary-400 bg-clip-text text-transparent;
+  }
+  
+  /* 渐变背景 */
+  .bg-gradient-glass {
+    @apply bg-gradient-to-br from-white/10 to-white/5;
+  }
+  
+  .bg-gradient-primary {
+    @apply bg-gradient-to-r from-primary-600 to-primary-500;
+  }
+  
+  .bg-gradient-emerald {
+    @apply bg-gradient-to-r from-emerald-600 to-emerald-500;
+  }
+  
+  .bg-gradient-amber {
+    @apply bg-gradient-to-r from-amber-600 to-amber-500;
+  }
+  
+  .bg-gradient-rose {
+    @apply bg-gradient-to-r from-rose-600 to-rose-500;
+  }
+  
+  /* ========== 按钮样式 ========== */
   
   .btn {
-    @apply px-4 py-2 rounded-lg font-medium transition-all duration-200 cursor-pointer;
+    @apply px-4 py-2 rounded-xl font-medium transition-all duration-300 cursor-pointer;
   }
   
   .btn-primary {
-    @apply bg-primary-600 hover:bg-primary-500 text-white;
+    @apply bg-gradient-to-r from-primary-600 to-primary-500 hover:from-primary-500 hover:to-primary-400 text-white shadow-lg hover:shadow-glow active:scale-95;
   }
   
   .btn-secondary {
-    @apply bg-slate-700 hover:bg-slate-600 text-slate-200;
+    @apply bg-white/10 hover:bg-white/20 text-slate-200 border border-white/15 hover:border-white/25 backdrop-blur-sm;
   }
   
   .btn-ghost {
-    @apply bg-transparent hover:bg-slate-700/50 text-slate-300;
+    @apply bg-transparent hover:bg-white/10 text-slate-300 hover:text-white;
   }
   
+  .btn-danger {
+    @apply bg-gradient-to-r from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-400 text-white;
+  }
+  
+  /* ========== 输入框样式 ========== */
+  
   .input {
-    @apply w-full px-4 py-2.5 bg-slate-900/50 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-primary-500 focus:ring-1 focus:ring-primary-500/50 transition-all;
+    @apply w-full px-4 py-2.5 bg-white/5 border border-white/15 rounded-xl text-white placeholder-slate-500 
+           focus:outline-none focus:border-primary-500/50 focus:ring-2 focus:ring-primary-500/20 
+           transition-all duration-300 backdrop-blur-sm;
+  }
+  
+  .input-glass {
+    @apply w-full px-4 py-2.5 bg-slate-900/50 border border-white/10 rounded-xl text-white placeholder-slate-500 
+           focus:outline-none focus:border-primary-500/50 focus:bg-slate-900/70 focus:shadow-glow
+           transition-all duration-300;
+  }
+  
+  /* ========== 卡片样式 (兼容旧代码) ========== */
+  
+  .card {
+    @apply glass p-4 transition-all duration-300;
+  }
+  
+  .card:hover {
+    @apply bg-white/15 border-white/25 shadow-glass-hover;
+  }
+  
+  .card-active {
+    @apply glow-border bg-gradient-to-r from-primary-900/30 to-white/10;
   }
 }
 
-/* 自定义滚动条样式 */
+/* ========== 自定义滚动条样式 ========== */
+
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -80,4 +175,26 @@ body {
 .custom-scrollbar {
   scrollbar-width: thin;
   scrollbar-color: rgba(100, 116, 139, 0.4) transparent;
+}
+
+/* ========== Reduced Motion 支持 ========== */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ========== Backdrop Filter Fallback ========== */
+
+@supports not (backdrop-filter: blur(12px)) {
+  .glass,
+  .glass-strong,
+  .glass-light {
+    background: rgba(30, 41, 59, 0.95);
+  }
 }

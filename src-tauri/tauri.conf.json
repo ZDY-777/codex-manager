@@ -13,17 +13,17 @@
         "windows": [
             {
                 "title": "Codex 账号管理器",
-                "width": 1024,
+                "width": 650,
                 "height": 700,
                 "center": true,
                 "resizable": true,
-                "minWidth": 1024,
+                "minWidth": 650,
                 "minHeight": 500,
                 "visible": true
             }
         ],
         "security": {
-            "csp": "default-src 'self'; connect-src 'self' https://api.openai.com https://chatgpt.com https://dav.jianguoyun.com; style-src 'self' 'unsafe-inline'"
+            "csp": "default-src 'self'; connect-src 'self' https://api.openai.com https://chatgpt.com https://auth.openai.com https://dav.jianguoyun.com; style-src 'self' 'unsafe-inline'"
         }
     },
     "bundle": {

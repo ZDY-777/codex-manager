@@ -1,18 +1,38 @@
 import { useState } from 'react';
 import { Header } from './components/Header';
+import { NavigationBar, ViewType } from './components/NavigationBar';
 import { AccountCard } from './components/AccountCard';
 import { AddAccountDialog } from './components/AddAccountDialog';
 import { EditAccountDialog } from './components/EditAccountDialog';
 import { SettingsDialog } from './components/SettingsDialog';
 import { PromptsPanel } from './components/PromptsPanel';
 import { SkillsPanel } from './components/SkillsPanel';
-import { CodexSyncDialog } from './components/CodexSyncDialog';
+import { AgentsPanel } from './components/AgentsPanel';
+import { ConfigPanel } from './components/ConfigPanel';
+import { SyncConfirmDialog } from './components/SyncConfirmDialog';
 import { useAccounts } from './hooks/useAccounts';
 import { invoke } from '@tauri-apps/api/core';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AccountInfo } from './types';
+import { AccountInfo, DEFAULT_SYNC_SETTINGS } from './types';
+import { GlassCard, GlassButton } from './components/ui';
 
-type ViewType = 'accounts' | 'prompts' | 'skills';
+// 空状态动画变体
+const emptyStateVariants = {
+  hidden: { opacity: 0, y: 20, scale: 0.95 },
+  visible: { 
+    opacity: 1, 
+    y: 0, 
+    scale: 1,
+    transition: { type: 'spring' as const, damping: 20, stiffness: 200 }
+  },
+};
+
+// 页面切换动画变体
+const pageVariants = {
+  initial: { opacity: 0, x: 20 },
+  animate: { opacity: 1, x: 0 },
+  exit: { opacity: 0, x: -20 },
+};
 
 function App() {
   const {
@@ -29,7 +49,7 @@ function App() {
   const [currentView, setCurrentView] = useState<ViewType>('accounts');
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isCodexSyncOpen, setIsCodexSyncOpen] = useState(false);
+  const [isSyncOpen, setIsSyncOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<AccountInfo | null>(null);
 
   const handleOpenDir = async () => {
@@ -40,10 +60,20 @@ function App() {
     }
   };
 
+  const handleNavigate = (view: ViewType) => {
+    setCurrentView(view);
+  };
+
+  const handleSyncComplete = (lastSyncTime: number) => {
+    updateSettings({
+      sync: { ...(settings.sync || DEFAULT_SYNC_SETTINGS), lastSyncTime }
+    });
+    refresh();
+  };
+
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-200 p-6 font-sans selection:bg-primary-500/30">
-      <div className="max-w-2xl mx-auto">
-        {/* 导航标签 */}
+    <div className="min-h-screen text-slate-200 p-4 sm:p-6 font-sans selection:bg-primary-500/30">
+      <div className="max-w-xl mx-auto">
         {currentView === 'accounts' && (
           <>
             <Header
@@ -54,92 +84,153 @@ function App() {
               loading={loading}
             />
             
-            {/* Codex 管理入口 */}
-            <div className="flex gap-2 mb-4">
-              <button
-                onClick={() => setCurrentView('prompts')}
-                className="flex-1 p-3 bg-slate-800/50 hover:bg-slate-800 border border-slate-700/50 hover:border-slate-600 rounded-xl transition-all flex items-center justify-center gap-2"
-              >
-                <svg className="w-5 h-5 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                <span className="text-sm text-slate-300">Prompts</span>
-              </button>
-              <button
-                onClick={() => setCurrentView('skills')}
-                className="flex-1 p-3 bg-slate-800/50 hover:bg-slate-800 border border-slate-700/50 hover:border-slate-600 rounded-xl transition-all flex items-center justify-center gap-2"
-              >
-                <svg className="w-5 h-5 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-                </svg>
-                <span className="text-sm text-slate-300">Skills</span>
-              </button>
-              <button
-                onClick={() => setIsCodexSyncOpen(true)}
-                className="p-3 bg-slate-800/50 hover:bg-slate-800 border border-slate-700/50 hover:border-slate-600 rounded-xl transition-all flex items-center justify-center"
-                title="Codex 配置同步"
-              >
-                <svg className="w-5 h-5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
-                </svg>
-              </button>
-            </div>
+            <NavigationBar
+              onNavigate={handleNavigate}
+              onSync={() => setIsSyncOpen(true)}
+            />
           </>
         )}
 
-        <main className="space-y-4 animate-slide-up">
-          {currentView === 'accounts' && (
-            <>
-              {accounts.length === 0 && !loading ? (
-                <div className="text-center py-12 bg-slate-800/50 rounded-2xl border border-slate-700/50">
-                  <div className="w-16 h-16 bg-slate-700/50 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <svg className="w-8 h-8 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                    </svg>
-                  </div>
-                  <h3 className="text-lg font-medium text-white mb-2">暂无账号</h3>
-                  <p className="text-slate-400 max-w-sm mx-auto mb-6">
-                    将 <span className="font-mono bg-slate-700 px-1 rounded text-xs">auth.json</span> 放入账号目录即可自动识别
-                  </p>
-                  <button
-                    onClick={() => setIsAddDialogOpen(true)}
-                    className="btn btn-primary"
+        <main className="space-y-4">
+          <AnimatePresence mode="wait">
+            {currentView === 'accounts' && (
+              <motion.div
+                key="accounts"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                transition={{ duration: 0.2 }}
+              >
+                {accounts.length === 0 && !loading ? (
+                  <motion.div
+                    variants={emptyStateVariants}
+                    initial="hidden"
+                    animate="visible"
                   >
-                    添加账号
-                  </button>
-                </div>
-              ) : (
-                <AnimatePresence initial={false}>
-                  {accounts.map(account => (
-                    <motion.div
-                      key={account.id}
-                      layout
-                      initial={{ opacity: 0, y: 12 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: -12 }}
-                      transition={{ type: 'spring', stiffness: 320, damping: 28, mass: 0.9 }}
-                    >
-                      <AccountCard
-                        account={account}
-                        onSwitch={() => switchAccount(account.filePath)}
-                        onEdit={() => setEditingAccount(account)}
-                        renameAccount={renameAccount}
-                        isBestCandidate={account.id === bestCandidateId}
-                      />
-                    </motion.div>
-                  ))}
-                </AnimatePresence>
-              )}
-            </>
-          )}
+                    <GlassCard className="text-center py-8 sm:py-12 px-4">
+                      <motion.div
+                        className="w-16 h-16 sm:w-20 sm:h-20 glass-light rounded-2xl flex items-center justify-center mx-auto mb-4 sm:mb-6"
+                        animate={{ 
+                          scale: [1, 1.05, 1],
+                          boxShadow: [
+                            '0 0 0 0 rgba(34, 211, 238, 0)',
+                            '0 0 20px 4px rgba(34, 211, 238, 0.2)',
+                            '0 0 0 0 rgba(34, 211, 238, 0)'
+                          ]
+                        }}
+                        transition={{ duration: 2.5, repeat: Infinity, ease: 'easeInOut' }}
+                      >
+                        <svg className="w-8 h-8 sm:w-10 sm:h-10 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
+                        </svg>
+                      </motion.div>
+                      <h3 className="text-lg sm:text-xl font-bold text-gradient mb-2">暂无账号</h3>
+                      <p className="text-slate-400 text-sm sm:text-base max-w-sm mx-auto mb-6">
+                        将 <span className="font-mono glass-light px-2 py-0.5 rounded-md text-xs text-primary-400">auth.json</span> 放入账号目录即可自动识别
+                      </p>
+                      <GlassButton
+                        variant="primary"
+                        onClick={() => setIsAddDialogOpen(true)}
+                        icon={
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                          </svg>
+                        }
+                      >
+                        添加账号
+                      </GlassButton>
+                    </GlassCard>
+                  </motion.div>
+                ) : (
+                  <div className="space-y-3">
+                    <AnimatePresence initial={false}>
+                      {accounts.map((account, index) => (
+                        <motion.div
+                          key={account.id}
+                          layout
+                          initial={{ opacity: 0, y: 12 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -12 }}
+                          transition={{ 
+                            type: 'spring', 
+                            stiffness: 320, 
+                            damping: 28, 
+                            mass: 0.9,
+                            delay: index * 0.05
+                          }}
+                        >
+                          <AccountCard
+                            account={account}
+                            onSwitch={() => switchAccount(account.filePath)}
+                            onEdit={() => setEditingAccount(account)}
+                            renameAccount={renameAccount}
+                            isBestCandidate={account.id === bestCandidateId}
+                            onRefresh={refresh}
+                          />
+                        </motion.div>
+                      ))}
+                    </AnimatePresence>
+                  </div>
+                )}
+              </motion.div>
+            )}
 
-          {currentView === 'prompts' && (
-            <PromptsPanel onBack={() => setCurrentView('accounts')} />
-          )}
+            {currentView === 'prompts' && (
+              <motion.div
+                key="prompts"
+                className="h-[calc(100vh-8rem)] sm:h-[calc(100vh-10rem)]"
+                variants={pageVariants}
+                initial="initial"
+                animate="animate"
+                exit="exit"
+                transition={{ duration: 0.2 }}
+              >
+                <PromptsPanel onBack={() => setCurrentView('accounts')} />
+              </motion.div>
+            )}
 
-          {currentView === 'skills' && (
-            <SkillsPanel onBack={() => setCurrentView('accounts')} />
-          )}
+            {currentView === 'skills' && (
+              <motion.div
+                key="skills"
+                className="h-[calc(100vh-8rem)] sm:h-[calc(100vh-10rem)]"
+                variants={pageVariants}
+                initial="initial"
+                animate="animate"
+                exit="exit"
+                transition={{ duration: 0.2 }}
+              >
+                <SkillsPanel onBack={() => setCurrentView('accounts')} />
+              </motion.div>
+            )}
+
+            {currentView === 'agents' && (
+              <motion.div
+                key="agents"
+                className="h-[calc(100vh-8rem)] sm:h-[calc(100vh-10rem)]"
+                variants={pageVariants}
+                initial="initial"
+                animate="animate"
+                exit="exit"
+                transition={{ duration: 0.2 }}
+              >
+                <AgentsPanel onBack={() => setCurrentView('accounts')} />
+              </motion.div>
+            )}
+
+            {currentView === 'config' && (
+              <motion.div
+                key="config"
+                className="h-[calc(100vh-8rem)] sm:h-[calc(100vh-10rem)]"
+                variants={pageVariants}
+                initial="initial"
+                animate="animate"
+                exit="exit"
+                transition={{ duration: 0.2 }}
+              >
+                <ConfigPanel onBack={() => setCurrentView('accounts')} />
+              </motion.div>
+            )}
+          </AnimatePresence>
         </main>
 
         <AddAccountDialog
@@ -159,13 +250,14 @@ function App() {
           onClose={() => setIsSettingsOpen(false)}
           settings={settings}
           onUpdateSettings={updateSettings}
-          onRefresh={refresh}
         />
 
-        <CodexSyncDialog
-          isOpen={isCodexSyncOpen}
-          onClose={() => setIsCodexSyncOpen(false)}
+        <SyncConfirmDialog
+          isOpen={isSyncOpen}
+          onClose={() => setIsSyncOpen(false)}
           webdavConfig={settings.webdav || { enabled: false, url: '', username: '', password: '', remotePath: '' }}
+          syncSettings={settings.sync || DEFAULT_SYNC_SETTINGS}
+          onSyncComplete={handleSyncComplete}
         />
       </div>
     </div>
