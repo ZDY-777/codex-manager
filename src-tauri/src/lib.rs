@@ -888,6 +888,862 @@ async fn webdav_test_connection(config: WebDavConfig) -> Result<String, String> 
     }
 }
 
+// ========== Prompts & Skills 管理 ==========
+
+fn get_codex_dir() -> PathBuf {
+    let home = dirs::home_dir().expect("无法获取用户目录");
+    home.join(".codex")
+}
+
+fn get_prompts_dir() -> PathBuf {
+    get_codex_dir().join("prompts")
+}
+
+fn get_skills_dir() -> PathBuf {
+    get_codex_dir().join("skills")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptInfo {
+    pub name: String,
+    pub description: String,
+    #[serde(rename = "argumentHint")]
+    pub argument_hint: Option<String>,
+    #[serde(rename = "filePath")]
+    pub file_path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub compatibility: Option<String>,
+    #[serde(rename = "dirPath")]
+    pub dir_path: String,
+    #[serde(rename = "hasScripts")]
+    pub has_scripts: bool,
+    #[serde(rename = "hasAssets")]
+    pub has_assets: bool,
+    #[serde(rename = "hasReferences")]
+    pub has_references: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexSyncConfig {
+    #[serde(rename = "syncPrompts")]
+    pub sync_prompts: bool,
+    #[serde(rename = "syncSkills")]
+    pub sync_skills: bool,
+    #[serde(rename = "syncAgentsMd")]
+    pub sync_agents_md: bool,
+    #[serde(rename = "syncModelConfig")]
+    pub sync_model_config: bool,
+    #[serde(rename = "syncMcpServers")]
+    pub sync_mcp_servers: bool,
+    #[serde(rename = "syncOtherConfig")]
+    pub sync_other_config: bool,
+}
+
+impl Default for CodexSyncConfig {
+    fn default() -> Self {
+        Self {
+            sync_prompts: true,
+            sync_skills: true,
+            sync_agents_md: true,
+            sync_model_config: true,
+            sync_mcp_servers: false,
+            sync_other_config: false,
+        }
+    }
+}
+
+/// 根据同步配置过滤 config.toml 内容
+fn filter_config_toml(content: &str, sync_config: &CodexSyncConfig) -> String {
+    let mut output = String::new();
+    let mut current_section = String::new();
+    let mut in_mcp_section = false;
+    let mut skip_section = false;
+    
+    for line in content.lines() {
+        let trimmed = line.trim();
+        
+        // 检测 section 头
+        if trimmed.starts_with('[') {
+            // 判断是否是 mcp_servers section
+            if trimmed.starts_with("[mcp_servers") {
+                in_mcp_section = true;
+                current_section = "mcp_servers".to_string();
+                skip_section = !sync_config.sync_mcp_servers;
+            } else if trimmed.starts_with("[notice") {
+                in_mcp_section = false;
+                current_section = "notice".to_string();
+                skip_section = !sync_config.sync_other_config;
+            } else {
+                in_mcp_section = false;
+                current_section = trimmed.trim_matches(|c| c == '[' || c == ']').to_string();
+                skip_section = !sync_config.sync_other_config;
+            }
+            
+            if !skip_section {
+                output.push_str(line);
+                output.push('\n');
+            }
+            continue;
+        }
+        
+        // 顶层键值对（不在任何 section 内）
+        if current_section.is_empty() && !in_mcp_section {
+            // model 和 model_reasoning_effort 属于模型配置
+            if trimmed.starts_with("model") {
+                if sync_config.sync_model_config {
+                    output.push_str(line);
+                    output.push('\n');
+                }
+            } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                // 其他顶层配置
+                if sync_config.sync_other_config {
+                    output.push_str(line);
+                    output.push('\n');
+                }
+            } else if trimmed.is_empty() || trimmed.starts_with('#') {
+                // 保留空行和注释（如果前面有内容）
+                if !output.is_empty() {
+                    output.push_str(line);
+                    output.push('\n');
+                }
+            }
+            continue;
+        }
+        
+        // section 内的内容
+        if !skip_section {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    
+    output
+}
+
+/// 合并远程 config.toml 到本地
+fn merge_config_toml(local_content: &str, remote_content: &str, sync_config: &CodexSyncConfig) -> String {
+    // 简单策略：用远程的同步字段覆盖本地
+    // 解析远程内容中的字段
+    let mut result = local_content.to_string();
+    
+    for line in remote_content.lines() {
+        let trimmed = line.trim();
+        
+        // 处理顶层 model 配置
+        if trimmed.starts_with("model") && sync_config.sync_model_config {
+            // 查找并替换本地的对应行
+            let key = if let Some(eq_idx) = trimmed.find('=') {
+                trimmed[..eq_idx].trim()
+            } else {
+                continue;
+            };
+            
+            // 在本地内容中查找并替换
+            let mut new_result = String::new();
+            let mut replaced = false;
+            for local_line in result.lines() {
+                if local_line.trim().starts_with(key) && local_line.contains('=') {
+                    new_result.push_str(line);
+                    replaced = true;
+                } else {
+                    new_result.push_str(local_line);
+                }
+                new_result.push('\n');
+            }
+            
+            // 如果本地没有这个字段，添加到开头
+            if !replaced {
+                result = format!("{}\n{}", line, result);
+            } else {
+                result = new_result;
+            }
+        }
+    }
+    
+    result
+}
+
+/// 解析 Markdown frontmatter (YAML)
+fn parse_frontmatter(content: &str) -> Option<serde_json::Value> {
+    let content = content.trim();
+    if !content.starts_with("---") {
+        return None;
+    }
+    
+    let rest = &content[3..];
+    if let Some(end_idx) = rest.find("\n---") {
+        let yaml_str = &rest[..end_idx].trim();
+        // 简单解析 YAML 为 JSON
+        let mut map = serde_json::Map::new();
+        for line in yaml_str.lines() {
+            if let Some(colon_idx) = line.find(':') {
+                let key = line[..colon_idx].trim().to_string();
+                let value = line[colon_idx + 1..].trim();
+                // 去掉引号
+                let value = value.trim_matches('"').trim_matches('\'');
+                // 处理多行值 (以 > 开头)
+                if value == ">" || value == "|" {
+                    continue; // 跳过多行标记，后续行会被忽略
+                }
+                map.insert(key, serde_json::Value::String(value.to_string()));
+            }
+        }
+        if !map.is_empty() {
+            return Some(serde_json::Value::Object(map));
+        }
+    }
+    None
+}
+
+/// 递归扫描 prompts 目录
+fn scan_prompts_recursive(dir: &PathBuf, prompts: &mut Vec<PromptInfo>) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // 递归扫描子目录
+                scan_prompts_recursive(&path, prompts);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    let frontmatter = parse_frontmatter(&content);
+                    
+                    let name = path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("未命名")
+                        .to_string();
+                    
+                    let description = frontmatter.as_ref()
+                        .and_then(|fm| fm.get("description"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    
+                    let argument_hint = frontmatter.as_ref()
+                        .and_then(|fm| fm.get("argument-hint"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    
+                    prompts.push(PromptInfo {
+                        name,
+                        description,
+                        argument_hint,
+                        file_path: path.to_string_lossy().to_string(),
+                        content,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// 扫描所有 prompts
+#[tauri::command]
+fn scan_prompts() -> Result<Vec<PromptInfo>, String> {
+    let prompts_dir = get_prompts_dir();
+    let mut prompts = Vec::new();
+    
+    if prompts_dir.exists() {
+        scan_prompts_recursive(&prompts_dir, &mut prompts);
+    }
+    
+    Ok(prompts)
+}
+
+/// 扫描所有 skills
+#[tauri::command]
+fn scan_skills() -> Result<Vec<SkillInfo>, String> {
+    let skills_dir = get_skills_dir();
+    let mut skills = Vec::new();
+    
+    if !skills_dir.exists() {
+        return Ok(skills);
+    }
+    
+    if let Ok(entries) = fs::read_dir(&skills_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            
+            // 跳过 .system 和 dist 目录
+            let dir_name = path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            if dir_name.starts_with('.') || dir_name == "dist" {
+                continue;
+            }
+            
+            let skill_md = path.join("SKILL.md");
+            if !skill_md.exists() {
+                continue;
+            }
+            
+            if let Ok(content) = fs::read_to_string(&skill_md) {
+                let frontmatter = parse_frontmatter(&content);
+                
+                let name = frontmatter.as_ref()
+                    .and_then(|fm| fm.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(dir_name)
+                    .to_string();
+                
+                let description = frontmatter.as_ref()
+                    .and_then(|fm| fm.get("description"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                
+                let compatibility = frontmatter.as_ref()
+                    .and_then(|fm| fm.get("compatibility"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                
+                skills.push(SkillInfo {
+                    name,
+                    description,
+                    compatibility,
+                    dir_path: path.to_string_lossy().to_string(),
+                    has_scripts: path.join("scripts").exists(),
+                    has_assets: path.join("assets").exists(),
+                    has_references: path.join("references").exists(),
+                });
+            }
+        }
+    }
+    
+    Ok(skills)
+}
+
+/// 读取 prompt 内容
+#[tauri::command]
+fn read_prompt_content(file_path: String) -> Result<String, String> {
+    fs::read_to_string(&file_path)
+        .map_err(|e| format!("读取文件失败: {}", e))
+}
+
+/// 保存 prompt 内容
+#[tauri::command]
+fn save_prompt_content(file_path: String, content: String) -> Result<(), String> {
+    fs::write(&file_path, content)
+        .map_err(|e| format!("保存文件失败: {}", e))
+}
+
+/// 创建新 prompt
+#[tauri::command]
+fn create_prompt(name: String, description: String, content: String) -> Result<String, String> {
+    let prompts_dir = get_prompts_dir();
+    if !prompts_dir.exists() {
+        fs::create_dir_all(&prompts_dir)
+            .map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+    
+    let file_name = format!("{}.md", name);
+    let file_path = prompts_dir.join(&file_name);
+    
+    if file_path.exists() {
+        return Err(format!("Prompt '{}' 已存在", name));
+    }
+    
+    let full_content = format!(
+        "---\ndescription: {}\n---\n\n{}",
+        description, content
+    );
+    
+    fs::write(&file_path, full_content)
+        .map_err(|e| format!("创建文件失败: {}", e))?;
+    
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+/// 删除 prompt
+#[tauri::command]
+fn delete_prompt(file_path: String) -> Result<(), String> {
+    fs::remove_file(&file_path)
+        .map_err(|e| format!("删除文件失败: {}", e))
+}
+
+/// 读取 skill 的 SKILL.md 内容
+#[tauri::command]
+fn read_skill_content(dir_path: String) -> Result<String, String> {
+    let skill_md = PathBuf::from(&dir_path).join("SKILL.md");
+    fs::read_to_string(&skill_md)
+        .map_err(|e| format!("读取文件失败: {}", e))
+}
+
+/// 保存 skill 的 SKILL.md 内容
+#[tauri::command]
+fn save_skill_content(dir_path: String, content: String) -> Result<(), String> {
+    let skill_md = PathBuf::from(&dir_path).join("SKILL.md");
+    fs::write(&skill_md, content)
+        .map_err(|e| format!("保存文件失败: {}", e))
+}
+
+/// 创建新 skill
+#[tauri::command]
+fn create_skill(name: String, description: String) -> Result<String, String> {
+    let skills_dir = get_skills_dir();
+    let skill_dir = skills_dir.join(&name);
+    
+    if skill_dir.exists() {
+        return Err(format!("Skill '{}' 已存在", name));
+    }
+    
+    fs::create_dir_all(&skill_dir)
+        .map_err(|e| format!("创建目录失败: {}", e))?;
+    
+    let skill_md_content = format!(
+        "---\nname: {}\ndescription: {}\n---\n\n# {}\n\n## When to Use\n- TODO\n\n## When NOT to Use\n- TODO\n\n## Workflow\n1. TODO\n",
+        name, description, name
+    );
+    
+    let skill_md = skill_dir.join("SKILL.md");
+    fs::write(&skill_md, skill_md_content)
+        .map_err(|e| format!("创建 SKILL.md 失败: {}", e))?;
+    
+    Ok(skill_dir.to_string_lossy().to_string())
+}
+
+/// 删除 skill
+#[tauri::command]
+fn delete_skill(dir_path: String) -> Result<(), String> {
+    fs::remove_dir_all(&dir_path)
+        .map_err(|e| format!("删除目录失败: {}", e))
+}
+
+/// 读取 AGENTS.MD
+#[tauri::command]
+fn read_agents_md() -> Result<String, String> {
+    let agents_md = get_codex_dir().join("AGENTS.MD");
+    if agents_md.exists() {
+        fs::read_to_string(&agents_md)
+            .map_err(|e| format!("读取文件失败: {}", e))
+    } else {
+        Ok(String::new())
+    }
+}
+
+/// 保存 AGENTS.MD
+#[tauri::command]
+fn save_agents_md(content: String) -> Result<(), String> {
+    let agents_md = get_codex_dir().join("AGENTS.MD");
+    fs::write(&agents_md, content)
+        .map_err(|e| format!("保存文件失败: {}", e))
+}
+
+/// 打开 Codex 目录
+#[tauri::command]
+fn open_codex_dir() -> Result<String, String> {
+    let dir = get_codex_dir();
+    
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| format!("打开目录失败: {}", e))?;
+    }
+    
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| format!("打开目录失败: {}", e))?;
+    }
+    
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| format!("打开目录失败: {}", e))?;
+    }
+    
+    Ok(dir.to_string_lossy().to_string())
+}
+
+// ========== Codex WebDAV 同步 ==========
+
+/// 同步 Codex 配置到 WebDAV (prompts, skills, AGENTS.MD)
+#[tauri::command]
+async fn webdav_sync_codex_upload(config: WebDavConfig, sync_config: CodexSyncConfig) -> Result<SyncResult, String> {
+    let client = webdav_client()?;
+    let codex_dir = get_codex_dir();
+    
+    let mut result = SyncResult {
+        uploaded: Vec::new(),
+        downloaded: Vec::new(),
+        errors: Vec::new(),
+    };
+    
+    // 确保远程 codex 目录存在
+    let codex_remote_path = format!("{}codex/", config.remote_path.trim_end_matches('/'));
+    let codex_config = WebDavConfig {
+        url: config.url.clone(),
+        username: config.username.clone(),
+        password: config.password.clone(),
+        remote_path: codex_remote_path.clone(),
+    };
+    
+    if let Err(e) = webdav_ensure_dir(&client, &codex_config).await {
+        println!("创建 codex 目录: {}", e);
+    }
+    
+    // 同步 AGENTS.MD
+    if sync_config.sync_agents_md {
+        let agents_md = codex_dir.join("AGENTS.MD");
+        if agents_md.exists() {
+            if let Ok(content) = fs::read_to_string(&agents_md) {
+                match webdav_upload(&client, &codex_config, "AGENTS.MD", &content).await {
+                    Ok(_) => result.uploaded.push("AGENTS.MD".to_string()),
+                    Err(e) => result.errors.push(format!("AGENTS.MD: {}", e)),
+                }
+            }
+        }
+    }
+    
+    // 同步 prompts
+    if sync_config.sync_prompts {
+        let prompts_remote = format!("{}prompts/", codex_remote_path);
+        let prompts_config = WebDavConfig {
+            url: config.url.clone(),
+            username: config.username.clone(),
+            password: config.password.clone(),
+            remote_path: prompts_remote,
+        };
+        let _ = webdav_ensure_dir(&client, &prompts_config).await;
+        
+        let prompts_dir = get_prompts_dir();
+        if prompts_dir.exists() {
+            upload_dir_recursive(&client, &prompts_config, &prompts_dir, &mut result).await;
+        }
+    }
+    
+    // 同步 skills
+    if sync_config.sync_skills {
+        let skills_remote = format!("{}skills/", codex_remote_path);
+        let skills_config = WebDavConfig {
+            url: config.url.clone(),
+            username: config.username.clone(),
+            password: config.password.clone(),
+            remote_path: skills_remote,
+        };
+        let _ = webdav_ensure_dir(&client, &skills_config).await;
+        
+        let skills_dir = get_skills_dir();
+        if skills_dir.exists() {
+            // 遍历 skills 目录
+            if let Ok(entries) = fs::read_dir(&skills_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let dir_name = path.file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    // 跳过 .system 和 dist
+                    if dir_name.starts_with('.') || dir_name == "dist" {
+                        continue;
+                    }
+                    
+                    // 为每个 skill 创建远程目录并上传
+                    let skill_remote = format!("{}{}/", skills_config.remote_path, dir_name);
+                    let skill_config = WebDavConfig {
+                        url: config.url.clone(),
+                        username: config.username.clone(),
+                        password: config.password.clone(),
+                        remote_path: skill_remote,
+                    };
+                    let _ = webdav_ensure_dir(&client, &skill_config).await;
+                    upload_dir_recursive(&client, &skill_config, &path, &mut result).await;
+                }
+            }
+        }
+    }
+    
+    // 同步 config.toml (按字段分组)
+    if sync_config.sync_model_config || sync_config.sync_mcp_servers || sync_config.sync_other_config {
+        let config_toml = codex_dir.join("config.toml");
+        if config_toml.exists() {
+            if let Ok(content) = fs::read_to_string(&config_toml) {
+                let filtered = filter_config_toml(&content, &sync_config);
+                if !filtered.trim().is_empty() {
+                    match webdav_upload(&client, &codex_config, "config.sync.toml", &filtered).await {
+                        Ok(_) => result.uploaded.push("config.sync.toml".to_string()),
+                        Err(e) => result.errors.push(format!("config.sync.toml: {}", e)),
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(result)
+}
+
+/// 递归上传目录
+async fn upload_dir_recursive(client: &reqwest::Client, config: &WebDavConfig, dir: &PathBuf, result: &mut SyncResult) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            
+            // 跳过 __pycache__ 等
+            if name.starts_with("__") || name.starts_with('.') {
+                continue;
+            }
+            
+            if path.is_dir() {
+                // 创建子目录并递归
+                let sub_remote = format!("{}{}/", config.remote_path, name);
+                let sub_config = WebDavConfig {
+                    url: config.url.clone(),
+                    username: config.username.clone(),
+                    password: config.password.clone(),
+                    remote_path: sub_remote,
+                };
+                let _ = webdav_ensure_dir(client, &sub_config).await;
+                Box::pin(upload_dir_recursive(client, &sub_config, &path, result)).await;
+            } else {
+                // 上传文件
+                if let Ok(content) = fs::read_to_string(&path) {
+                    match webdav_upload(client, config, name, &content).await {
+                        Ok(_) => result.uploaded.push(format!("{}{}", config.remote_path, name)),
+                        Err(e) => result.errors.push(format!("{}: {}", name, e)),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 从 WebDAV 下载 Codex 配置
+#[tauri::command]
+async fn webdav_sync_codex_download(config: WebDavConfig, sync_config: CodexSyncConfig) -> Result<SyncResult, String> {
+    let client = webdav_client()?;
+    let codex_dir = get_codex_dir();
+    
+    let mut result = SyncResult {
+        uploaded: Vec::new(),
+        downloaded: Vec::new(),
+        errors: Vec::new(),
+    };
+    
+    let codex_remote_path = format!("{}codex/", config.remote_path.trim_end_matches('/'));
+    let codex_config = WebDavConfig {
+        url: config.url.clone(),
+        username: config.username.clone(),
+        password: config.password.clone(),
+        remote_path: codex_remote_path.clone(),
+    };
+    
+    // 下载 AGENTS.MD
+    if sync_config.sync_agents_md {
+        match webdav_download(&client, &codex_config, "AGENTS.MD").await {
+            Ok(content) => {
+                let agents_md = codex_dir.join("AGENTS.MD");
+                match fs::write(&agents_md, &content) {
+                    Ok(_) => result.downloaded.push("AGENTS.MD".to_string()),
+                    Err(e) => result.errors.push(format!("AGENTS.MD: 写入失败 {}", e)),
+                }
+            }
+            Err(e) => {
+                if !e.contains("404") {
+                    result.errors.push(format!("AGENTS.MD: {}", e));
+                }
+            }
+        }
+    }
+    
+    // 下载 prompts
+    if sync_config.sync_prompts {
+        let prompts_remote = format!("{}prompts/", codex_remote_path);
+        let prompts_config = WebDavConfig {
+            url: config.url.clone(),
+            username: config.username.clone(),
+            password: config.password.clone(),
+            remote_path: prompts_remote,
+        };
+        let prompts_dir = get_prompts_dir();
+        if !prompts_dir.exists() {
+            let _ = fs::create_dir_all(&prompts_dir);
+        }
+        download_dir_recursive(&client, &prompts_config, &prompts_dir, &mut result).await;
+    }
+    
+    // 下载 skills
+    if sync_config.sync_skills {
+        let skills_remote = format!("{}skills/", codex_remote_path);
+        let skills_config = WebDavConfig {
+            url: config.url.clone(),
+            username: config.username.clone(),
+            password: config.password.clone(),
+            remote_path: skills_remote,
+        };
+        let skills_dir = get_skills_dir();
+        if !skills_dir.exists() {
+            let _ = fs::create_dir_all(&skills_dir);
+        }
+        download_dir_recursive(&client, &skills_config, &skills_dir, &mut result).await;
+    }
+    
+    // 下载并合并 config.toml
+    if sync_config.sync_model_config || sync_config.sync_mcp_servers || sync_config.sync_other_config {
+        match webdav_download(&client, &codex_config, "config.sync.toml").await {
+            Ok(remote_content) => {
+                let config_toml = codex_dir.join("config.toml");
+                let local_content = if config_toml.exists() {
+                    fs::read_to_string(&config_toml).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                
+                let merged = merge_config_toml(&local_content, &remote_content, &sync_config);
+                match fs::write(&config_toml, &merged) {
+                    Ok(_) => result.downloaded.push("config.toml (merged)".to_string()),
+                    Err(e) => result.errors.push(format!("config.toml: 写入失败 {}", e)),
+                }
+            }
+            Err(e) => {
+                if !e.contains("404") && !e.contains("HTTP 404") {
+                    result.errors.push(format!("config.sync.toml: {}", e));
+                }
+            }
+        }
+    }
+    
+    Ok(result)
+}
+
+/// 递归下载目录
+async fn download_dir_recursive(client: &reqwest::Client, config: &WebDavConfig, local_dir: &PathBuf, result: &mut SyncResult) {
+    // 列出远程文件
+    match webdav_list_all(client, config).await {
+        Ok(items) => {
+            for item in items {
+                if item.ends_with('/') {
+                    // 是目录，递归下载
+                    let dir_name = item.trim_end_matches('/');
+                    let sub_remote = format!("{}{}/", config.remote_path, dir_name);
+                    let sub_config = WebDavConfig {
+                        url: config.url.clone(),
+                        username: config.username.clone(),
+                        password: config.password.clone(),
+                        remote_path: sub_remote,
+                    };
+                    let sub_local = local_dir.join(dir_name);
+                    if !sub_local.exists() {
+                        let _ = fs::create_dir_all(&sub_local);
+                    }
+                    Box::pin(download_dir_recursive(client, &sub_config, &sub_local, result)).await;
+                } else {
+                    // 是文件，下载
+                    match webdav_download(client, config, &item).await {
+                        Ok(content) => {
+                            let local_path = local_dir.join(&item);
+                            match fs::write(&local_path, &content) {
+                                Ok(_) => result.downloaded.push(format!("{}{}", config.remote_path, item)),
+                                Err(e) => result.errors.push(format!("{}: 写入失败 {}", item, e)),
+                            }
+                        }
+                        Err(e) => result.errors.push(format!("{}: {}", item, e)),
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            if !e.contains("404") {
+                result.errors.push(format!("列目录失败: {}", e));
+            }
+        }
+    }
+}
+
+/// 列出 WebDAV 目录中的所有文件和子目录
+async fn webdav_list_all(client: &reqwest::Client, config: &WebDavConfig) -> Result<Vec<String>, String> {
+    let remote_path = normalize_remote_path(&config.remote_path);
+    let url = format!("{}{}", config.url.trim_end_matches('/'), remote_path);
+    
+    let response = client
+        .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &url)
+        .basic_auth(&config.username, Some(&config.password))
+        .header("Depth", "1")
+        .header("Content-Type", "application/xml; charset=utf-8")
+        .body(r#"<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><displayname/><resourcetype/></prop></propfind>"#)
+        .send()
+        .await
+        .map_err(|e| format!("列目录失败: {}", e))?;
+    
+    let status = response.status();
+    if !status.is_success() && status.as_u16() != 207 {
+        return Err(format!("列目录失败: HTTP {}", status));
+    }
+    
+    let body = response.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+    
+    let mut items = Vec::new();
+    let href_patterns = ["<d:href>", "<D:href>", "<href>"];
+    let href_end_patterns = ["</d:href>", "</D:href>", "</href>"];
+    
+    // 检查是否是目录
+    let _is_collection = body.contains("<d:collection") || body.contains("<D:collection") || body.contains("<collection");
+    
+    for (start_pat, end_pat) in href_patterns.iter().zip(href_end_patterns.iter()) {
+        let mut search_pos = 0;
+        let mut first = true;
+        while let Some(start_idx) = body[search_pos..].find(start_pat) {
+            let abs_start = search_pos + start_idx + start_pat.len();
+            if let Some(end_idx) = body[abs_start..].find(end_pat) {
+                let href_content = &body[abs_start..abs_start + end_idx];
+                let decoded = urlencoding::decode(href_content).unwrap_or_else(|_| href_content.into());
+                
+                // 跳过第一个（当前目录本身）
+                if first {
+                    first = false;
+                    search_pos = abs_start + end_idx;
+                    continue;
+                }
+                
+                // 提取文件/目录名
+                let name = decoded.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+                if !name.is_empty() && !name.starts_with('.') {
+                    // 检查这个 href 后面是否有 collection 标记
+                    let check_range = &body[abs_start..body.len().min(abs_start + 500)];
+                    let is_dir = check_range.contains("<d:collection") || 
+                                 check_range.contains("<D:collection") ||
+                                 check_range.contains("<collection");
+                    
+                    let item_name = if is_dir && !decoded.ends_with('/') {
+                        format!("{}/", name)
+                    } else if decoded.ends_with('/') {
+                        format!("{}/", name)
+                    } else {
+                        name.to_string()
+                    };
+                    
+                    if !items.contains(&item_name) {
+                        items.push(item_name);
+                    }
+                }
+                search_pos = abs_start + end_idx;
+            } else {
+                break;
+            }
+        }
+    }
+    
+    Ok(items)
+}
+
 // ========== 入口 ==========
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -984,7 +1840,23 @@ pub fn run() {
             update_account_content,
             webdav_sync_upload,
             webdav_sync_download,
-            webdav_test_connection
+            webdav_test_connection,
+            // Prompts & Skills
+            scan_prompts,
+            scan_skills,
+            read_prompt_content,
+            save_prompt_content,
+            create_prompt,
+            delete_prompt,
+            read_skill_content,
+            save_skill_content,
+            create_skill,
+            delete_skill,
+            read_agents_md,
+            save_agents_md,
+            open_codex_dir,
+            webdav_sync_codex_upload,
+            webdav_sync_codex_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

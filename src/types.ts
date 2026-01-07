@@ -62,3 +62,47 @@ export const DEFAULT_SETTINGS: AppSettings = {
         remotePath: '/codex-manager/',
     },
 };
+
+// ========== Prompts & Skills ==========
+
+export interface PromptInfo {
+    name: string;
+    description: string;
+    argumentHint?: string;
+    filePath: string;
+    content: string;
+}
+
+export interface SkillInfo {
+    name: string;
+    description: string;
+    compatibility?: string;
+    dirPath: string;
+    hasScripts: boolean;
+    hasAssets: boolean;
+    hasReferences: boolean;
+}
+
+export interface CodexSyncConfig {
+    syncPrompts: boolean;
+    syncSkills: boolean;
+    syncAgentsMd: boolean;
+    syncModelConfig: boolean;      // model, model_reasoning_effort
+    syncMcpServers: boolean;       // mcp_servers.*
+    syncOtherConfig: boolean;      // notice.* 等其他配置
+}
+
+export const DEFAULT_CODEX_SYNC_CONFIG: CodexSyncConfig = {
+    syncPrompts: true,
+    syncSkills: true,
+    syncAgentsMd: true,
+    syncModelConfig: true,
+    syncMcpServers: false,         // 默认不同步（路径因设备而异）
+    syncOtherConfig: false,
+};
+
+export interface SyncResult {
+    uploaded: string[];
+    downloaded: string[];
+    errors: string[];
+}
